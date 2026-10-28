@@ -1,0 +1,19 @@
+# 构建产物
+build/
+*.apk
+*.aab
+
+# 签名密钥（绝对不要提交）
+keys/
+
+# 第三方二进制依赖与模型（用 scripts/fetch-deps.sh 下载）
+deps/
+app/assets/gesture/*.task
+app/assets/face/*.task
+!app/assets/**/.gitkeep
+
+# IDE / 系统
+.idea/
+*.iml
+.DS_Store
+*.log

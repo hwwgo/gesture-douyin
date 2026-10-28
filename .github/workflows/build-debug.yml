@@ -1,0 +1,93 @@
+name: Build debug APK
+
+# 自动产出可直接安装的 debug APK（无需本地 SDK）：
+#   · push / PR  → 构建并上传 artifact，在 Actions 页面下载
+#   · 打 v* tag  → 额外把 APK 挂到 GitHub Release
+#   · 也可在 Actions 页手动点 "Run workflow"
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # 打 tag 时创建 Release 需要
+
+concurrency:
+  group: debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 确保 build-tools 35 与 platform 35
+        run: |
+          # runner 上通常已有，缺了才装；失败也不致命（build.sh 会取现有最高版本）
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" \
+            < /dev/null > /dev/null 2>&1 || \
+            echo "::warning::sdkmanager 安装失败，改用 runner 自带的 build-tools"
+
+      - name: 缓存依赖与模型（约 35MB）
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            app/assets/gesture/gesture_recognizer.task
+            app/assets/face/face_landmarker.task
+          key: mediapipe-0.10.14-${{ runner.os }}-v1
+
+      - name: 缓存 debug 签名密钥
+        uses: actions/cache@v4
+        with:
+          # 固定一份 debug 密钥，连续几次构建出来的包可以互相覆盖升级
+          path: keys/debug.keystore
+          key: debug-keystore-v1
+
+      - name: 下载 MediaPipe 依赖与模型
+        run: bash scripts/fetch-deps.sh
+
+      - name: 构建 debug APK
+        run: bash build.sh debug
+
+      - name: 校验产物（debuggable + 签名）
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          BT="$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)"
+          APK="$(ls build/debug/*.apk | head -1)"
+          echo "APK=$APK"
+          "$BT/aapt2" dump badging "$APK" | grep -E "^package|application-debuggable" || true
+          "$BT/apksigner" verify --print-certs "$APK" | head -3
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gesture-douyin-debug-${{ github.sha }}
+          path: build/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 附加到 Release（仅在推送 v* tag 时）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/debug/*.apk
+          generate_release_notes: true
+          body: |
+            自动构建的 **debug** 版本：已开启 `android:debuggable`，
+            用 debug 密钥签名，安装前请先卸载正式版。
