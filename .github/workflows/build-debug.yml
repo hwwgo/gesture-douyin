@@ -4,6 +4,11 @@ name: Build debug APK
 #   · push / PR  → 构建并上传 artifact，在 Actions 页面下载
 #   · 打 v* tag  → 额外把 APK 挂到 GitHub Release
 #   · 也可在 Actions 页手动点 "Run workflow"
+#
+# 注意：这里**不用** android-actions/setup-android。
+# 它 v3 会执行 `sdkmanager tools`，而 `tools` 包在新版 cmdline-tools（16+）里已被移除，
+# 必然报 "Warning: Failed to find package 'tools'" 并让 job 直接失败。
+# runner 镜像本来就预装完整 SDK，直接用即可，缺组件时自己调 sdkmanager 补。
 
 on:
   push:
@@ -19,6 +24,11 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # 固定版本，避免 runner 预装更高版本 build-tools 时行为漂移
+  BT_VERSION: "35.0.0"
+  PLATFORM_VERSION: "android-35"
+
 jobs:
   debug:
     runs-on: ubuntu-latest
@@ -33,15 +43,35 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 准备 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 确保 build-tools 35 与 platform 35
+      - name: 配置 Android SDK（复用 runner 预装）
         run: |
-          # runner 上通常已有，缺了才装；失败也不致命（build.sh 会取现有最高版本）
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" \
-            < /dev/null > /dev/null 2>&1 || \
-            echo "::warning::sdkmanager 安装失败，改用 runner 自带的 build-tools"
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error::找不到 Android SDK：$SDK"
+            exit 1
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "SDK 目录：$SDK"
+          echo "--- 现有组件 ---"
+          ls -d "$SDK"/build-tools/* "$SDK"/platforms/android-* 2>/dev/null || true
+
+          # 缺 build-tools 35 / platform 35 才补装（runner 一般已自带）
+          need=""
+          ls -d "$SDK"/build-tools/"${BT_VERSION%%.*}"* > /dev/null 2>&1 \
+            || need="$need build-tools;${BT_VERSION}"
+          [ -d "$SDK/platforms/$PLATFORM_VERSION" ] \
+            || need="$need platforms;$PLATFORM_VERSION"
+          if [ -n "$need" ]; then
+            SM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | tail -1)"
+            echo "补装：$need（sdkmanager: ${SM:-未找到}）"
+            if [ -n "$SM" ]; then
+              yes | "$SM" $need > /dev/null 2>&1 \
+                || echo "::warning::组件安装失败，build.sh 会退回现有版本"
+            fi
+          else
+            echo "build-tools $BT_VERSION 与 platform $PLATFORM_VERSION 已存在"
+          fi
 
       - name: 缓存依赖与模型（约 35MB）
         uses: actions/cache@v4

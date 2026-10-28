@@ -59,14 +59,34 @@ if [ ! -d "$SDK" ]; then
     echo "请设置 ANDROID_SDK_ROOT（例如 export ANDROID_SDK_ROOT=~/Android/Sdk）" >&2
     exit 1
 fi
-# 取版本号最大的 build-tools / platform
-BT="$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1 || true)"
-PLATFORM="$(ls -d "$SDK"/platforms/android-* 2>/dev/null | sort -V | tail -1 || true)"
+# build-tools / platform：默认取版本号最大的；可用 BT_VERSION / PLATFORM_VERSION 固定
+# （CI 里固定成 35.0.0 / android-35，避免 runner 预装更高版本时行为漂移）
+BT=""
+if [ -n "${BT_VERSION:-}" ]; then
+    if [ -d "$SDK/build-tools/$BT_VERSION" ]; then
+        BT="$SDK/build-tools/$BT_VERSION"
+    else
+        echo "提示：未安装 build-tools $BT_VERSION，退回自动探测" >&2
+    fi
+fi
+[ -n "$BT" ] || BT="$(ls -d "$SDK"/build-tools/* 2>/dev/null | sort -V | tail -1 || true)"
+
+PLATFORM=""
+if [ -n "${PLATFORM_VERSION:-}" ]; then
+    if [ -d "$SDK/platforms/$PLATFORM_VERSION" ]; then
+        PLATFORM="$SDK/platforms/$PLATFORM_VERSION"
+    else
+        echo "提示：未安装 platform $PLATFORM_VERSION，退回自动探测" >&2
+    fi
+fi
+[ -n "$PLATFORM" ] || PLATFORM="$(ls -d "$SDK"/platforms/android-* 2>/dev/null | sort -V | tail -1 || true)"
+
 AJAR="$PLATFORM/android.jar"
 if [ -z "$BT" ] || [ -z "$PLATFORM" ] || [ ! -f "$AJAR" ]; then
     echo "SDK 不完整：需要 build-tools 与 platforms/android-XX（当前 $SDK）" >&2
     exit 1
 fi
+echo "SDK：$(basename "$BT") / $(basename "$PLATFORM")"
 
 # ---------------- 依赖检查 ----------------
 MP="$DEPS/mediapipe"
