@@ -1,5 +1,21 @@
-# 手势切抖音 v5.3 · 构建说明（纯视觉 · 精简优化）
+# 手势切抖音 v5.5 · 构建说明（纯视觉 · 精简优化）
 
+> **v5.5 = 表情动作全部摊在界面上（动作清单卡片）**：
+> 原先 8 种动作只存在于两个 Spinner 里，不展开根本不知道还有什么可用，
+> 现在「面部表情」区块下方直接一张灰底卡片，逐行列出 `动作名 + 怎么做 + 推荐阈值`。
+> 文案由 `FACE_ACTIONS` 驱动（`faceHint(key)` 给做法说明），以后加动作只改那张表即可，
+> 清单会自动跟着变，不会出现「代码支持、界面没写」的错位。
+> 手势区同步把「1~5 根手指」写明在提示里（原来只说「握拳 0 根不触发」）。
+> 版本号 5.4(42) → 5.5(43)，包名不变，可用同一密钥覆盖升级。
+> **v5.4 = 首页加「打开抖音」按钮**（摆在「停止识别」下面）：点一下直接进抖音，
+> 识别在前台服务里继续跑，进去就能用手势/表情翻页。
+> 极速版优先（`com.ss.android.ugc.aweme.lite`），没装则开正式版（`com.ss.android.ugc.aweme`），
+> 都没装按钮置灰、显示「打开抖音（未安装）」。
+> **关键坑是 Android 11+ 的包可见性**：必须在 manifest 的 `<queries>` 里用
+> `<package android:name="…"/>` 声明这两个包名，否则 `getLaunchIntentForPackage()`
+> 对已安装的抖音也返回 `null`——按钮永远是灰的，且没有任何异常可抓。
+> 另外点击时**重新检测**而不是复用 onCreate 的结果，中途装/卸抖音都不用重启 App。
+> 版本号 5.3(41) → 5.4(42)，包名不变，可用同一密钥覆盖升级。
 > **v5.3 = 表情动作扩到 8 种（含「露牙」）**：
 > 新增 `scoreOf(action, shapes)`，把组合动作也算成分数——`mouthSmile` = 左右嘴角上扬均值（露牙笑）、
 > `teethBare` = min(上唇上提均值, 下唇下拉均值)（龇牙）、`eyeSquint`/`eyeWide` = 左右眼均值；
@@ -1044,6 +1060,23 @@ root 模式保留 v2.6 全部直注+验证+自动重试逻辑。v3.0 按要求�
 6. **CI 校验 debuggable 真的生效**：`aapt2 dump badging` 里出现 `application-debuggable`
    这一行才算数——只看构建成功不够，`sed` 没匹配到 manifest 结构时会静默失败，
    所以脚本里额外 `grep -q 'android:debuggable="true"'` 做断言。
+7. **CI 里别用 `android-actions/setup-android@v3`**：它无论镜像里有没有 SDK，都会跑
+   `sdkmanager tools`；而 `tools` 包在新版 cmdline-tools（16.x）的仓库索引里已删除，
+   于是 `Warning: Failed to find package 'tools'` → `exit code 1` → job 在它这一步就挂，
+   后面的 checkout 都白跑（真实踩坑：2026-10-28 的 run 全程只活到 17:17:35）。
+   runner 镜像自带 `/usr/local/lib/android/sdk`，直接 `echo ANDROID_SDK_ROOT=... >> $GITHUB_ENV`
+   就行；真缺 `build-tools;35.0.0` / `platforms;android-35` 再用 sdkmanager 补，且失败不致命。
+8. **CI 要钉死构建工具版本**：`build.sh` 默认取「版本号最大」的 build-tools，
+   runner 预装 36.x 时会和本地 35.0.0 的行为不一致。用 `BT_VERSION` / `PLATFORM_VERSION`
+   环境变量固定（脚本在目录不存在时自动退回探测，不会因为版本号写错而失败）。
+9. **`zipalign` 必须带 `-p` / `-P 16`，否则打出来的包手机装不上**（v5.4 真实翻车）：
+   manifest 是 `extractNativeLibs="false"`，系统直接 mmap APK 里的 `.so`，要求页对齐。
+   第一次构建 v5.4 时用的是 build-tools 34 的 zipalign（不认 `-P 16`），退化分支写成了
+   `zipalign -f 4`——只保证 4 字节，`.so` 落在偏移 11288952（`% 4096 = 376`）。症状极具迷惑性：
+   `apksigner verify` 通过、`aapt2 dump badging` 正常、`unzip -t` 无错，只有手机报
+   `INSTALL_FAILED_INVALID_APK`。和正常的 v5.3 对比才看出差别（偏移 11288576，正好 `% 16384 = 0`）。
+   现在脚本：`-P 16` → 不支持退 `-p`（4KB 页对齐）→ 再失败直接报错；签名前用
+   `zipalign -c -P 16 / -c -p` 自检，不通过就 `exit 1`，不再产出"能验不能装"的包。
 
 ## 版本对应
 

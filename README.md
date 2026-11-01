@@ -18,6 +18,8 @@
 | 画面放大 | 1.0x~4.0x 数字变焦，手机离得远时把画面中心放大后再识别 |
 | 高精度模式 | 采集分辨率 640×480 → 960×720（可选，更准更耗电） |
 | 摄像头预览 | 在 App 内直接看识别引擎处理的那一帧，方便调角度/光线 |
+| 一键开抖音 | 「停止识别」下方一个按钮，**极速版优先**（`…aweme.lite`），没装就开正式版（`…aweme`） |
+| 动作清单 | 表情区下方直接列出全部 8 种动作（动作名 / 怎么做 / 推荐阈值），不用翻下拉 |
 | 防误触 | 动作需保持 0.4~0.5 秒；可设触发冷却；握拳不触发 |
 | 隐私友好 | 息屏即停止识别（等同手动停止）；不写任何图像文件 |
 
@@ -81,6 +83,12 @@ KS_PATH=~/my.keystore KS_ALIAS=voice KS_STORE_PASS=123456 KS_KEY_PASS=123456 \
 
 `build/debug/` 与 `build/` 互不干扰，两种产物可以并存。
 
+> **打包必须做页对齐（`zipalign -p` / `-P 16`）。** manifest 里 `extractNativeLibs="false"`，
+> 系统会直接 mmap APK 内的 `.so`，没按页对齐的包 `apksigner verify` 全绿、`unzip -t` 也正常，
+> 但手机上就是 `INSTALL_FAILED_INVALID_APK` 装不上——v5.4 第一次交付就踩了这个坑
+> （`.so` 偏移 11288952，`% 4096 = 376`）。脚本现在会先试 `-P 16`，不支持再退 `-p`（4KB），
+> 并在签名前用 `zipalign -c` 自检，对齐不过直接 `exit 1`。
+
 ## 使用
 
 安装后需要：
@@ -132,6 +140,10 @@ KS_PATH=~/my.keystore KS_ALIAS=voice KS_STORE_PASS=123456 KS_KEY_PASS=123456 \
   固定阈值必然有人不好用。日志会输出「露牙笑 0.38/0.45」这样的实时分数，照着调即可。
 - **YUV 转换复用缓冲**：每帧 30 万像素，原先每帧新建 `int[307200]` + Bitmap，
   5fps 下每秒约 6MB 垃圾，GC 抖动会让识别卡顿；改为复用后稳定。
+- **「打开抖音」要声明包可见性**：Android 11+ 下 `getLaunchIntentForPackage()` 只会返回
+  `<queries>` 里声明过的包，漏了这一步，装了抖音也会一直返回 `null`（按钮永远是灰的）。
+  两个包名 `com.ss.android.ugc.aweme`（正式版）、`com.ss.android.ugc.aweme.lite`（极速版）
+  都写在 manifest 的 `<queries><package>` 里。
 - 更多踩坑（依赖链、符号版本、assets 压缩、16KB 页对齐等）见 `docs/BUILD-NOTES.md`。
 
 ## 已知限制
@@ -183,10 +195,21 @@ git push -u origin main
 | 推 `v*` tag | 额外创建一个 Release，把 `gesture-douyin-vX.Y-debug.apk` 挂上去 |
 | Actions 页手动 *Run workflow* | 同 push |
 
-流程：`checkout` → JDK 17 → Android SDK（含 build-tools 35 / platform 35）→
+流程：`checkout` → JDK 17 → **直接复用 runner 预装的 Android SDK**（缺 build-tools 35 /
+platform 35 才用 `sdkmanager` 补，装不上就退回现有版本）→
 缓存 `deps/`、两个模型与固定 debug 密钥（首次约 35MB，之后命中缓存，连续几次构建的包可互相覆盖升级）→
 `scripts/fetch-deps.sh` → `build.sh debug` → 用 `aapt2 dump badging` 断言
 `application-debuggable` 出现 → 上传产物。
+
+> **不要用 `android-actions/setup-android@v3`。** 它内部固定执行 `sdkmanager tools`，
+> 而 `tools` 这个包在新版 cmdline-tools（16.x）里已经被移除，2026 年的 runner 镜像上
+> 必然报 `Warning: Failed to find package 'tools'` 后 `exit code 1`，job 在第一步就失败
+> （症状：日志里停在 *Run android-actions/setup-android@v3*，后面所有步骤都没跑）。
+> runner 本来就带完整 SDK，自己设 `ANDROID_SDK_ROOT` 即可。
+>
+> 另外 workflow 用 `BT_VERSION` / `PLATFORM_VERSION` 把 build-tools 与 platform 钉在
+> 35.0.0 / android-35：runner 若预装了更高的 36.x，`build.sh` 默认会取最高版本，
+> 构建行为可能和本地不一致。钉死版本更可复现（未安装时脚本会自动退回探测）。
 
 > 首次跑会下载依赖，约 3–5 分钟；之后有缓存大约 1 分钟。
 > 想让 release 版也自动出包，需要把签名密钥放进仓库 Secrets——不建议，

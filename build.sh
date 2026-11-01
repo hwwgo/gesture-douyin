@@ -176,13 +176,30 @@ mkdir -p "$OUT/lib/arm64-v8a"
 cp "$MP/jni/arm64-v8a/libmediapipe_tasks_vision_jni.so" "$OUT/lib/arm64-v8a/"
 (cd "$OUT" && zip -q -0 -X "$OUT/unsigned.apk" lib/arm64-v8a/libmediapipe_tasks_vision_jni.so)
 
-echo "== [6/7] zipalign（16KB 页对齐，Android 15 起要求）=="
+echo "== [6/7] zipalign（页对齐，Android 15 起要求 16KB）=="
+# -P 16：16KB 页对齐（build-tools 35+ 才有）；不支持则退回 -p（4KB 页对齐）。
+# 这里必须带 -p/-P：manifest 是 extractNativeLibs=false，系统会直接 mmap APK 里的 .so，
+# 只做「4 字节对齐」的包在 Android 15 上会 INSTALL_FAILED_INVALID_APK
+# （真踩过：zipalign 静默成功、apksigner 也验过，但手机装不上）。
 if "$BT/zipalign" -P 16 -f -v 4 "$OUT/unsigned.apk" "$OUT/aligned.apk" > "$OUT/align.log" 2>&1; then
     grep -E "lib/.*\.so" "$OUT/align.log" || true
     echo "  16KB 页对齐 OK"
+elif "$BT/zipalign" -f -p -v 4 "$OUT/unsigned.apk" "$OUT/aligned.apk" > "$OUT/align.log" 2>&1; then
+    grep -E "lib/.*\.so" "$OUT/align.log" || true
+    echo "  警告：当前 build-tools 不支持 -P 16，已退化为 4KB 页对齐"
+    echo "        16KB 页设备（部分 Android 15 机型）可能装不上，建议升级 build-tools 到 35+"
 else
-    echo "  （当前 build-tools 不支持 -P，退化为 4 字节对齐）"
+    echo "  !! zipalign 失败，.so 没有页对齐，打出来的包会被系统拒绝安装" >&2
     "$BT/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
+fi
+# 自检：对齐不通过就别往下签名了，省得又交付一个装不上的包
+if "$BT/zipalign" -c -P 16 4 "$OUT/aligned.apk" > /dev/null 2>&1; then
+    echo "  自检：16KB 页对齐通过"
+elif "$BT/zipalign" -c -p 4 "$OUT/aligned.apk" > /dev/null 2>&1; then
+    echo "  自检：4KB 页对齐通过"
+else
+    echo "  !! 自检失败：.so 未页对齐，装到 Android 15 会失败" >&2
+    exit 1
 fi
 
 echo "== [7/7] 签名 =="

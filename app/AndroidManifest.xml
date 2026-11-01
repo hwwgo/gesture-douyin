@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     package="com.handsfree.douyin"
-    android:versionCode="41"
-    android:versionName="5.3">
+    android:versionCode="43"
+    android:versionName="5.5">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34"/>
 
@@ -24,6 +24,10 @@
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="shortx"/>
         </intent>
+        <!-- v5.4：「打开抖音」按钮。Android 11+ 不声明包名的话，
+             getLaunchIntentForPackage() 对已安装的抖音也会返回 null -->
+        <package android:name="com.ss.android.ugc.aweme"/>
+        <package android:name="com.ss.android.ugc.aweme.lite"/>
     </queries>
 
     <application

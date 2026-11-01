@@ -191,6 +191,47 @@ public class MainActivity extends Activity {
         });
         root.addView(stop);
 
+        // ---- v5.4：一键打开抖音（识别开着的话，进去就能用手势/表情控制）----
+        // 极速版优先（日常用的就是它），没装极速版就开正式版。
+        // 按钮不禁用：中途装了抖音回来点一下就能纠正文案，不用重启 App。
+        final String dyPkg = findDouyin();
+        final Button openDouyin = new Button(this);
+        openDouyin.setText(dyPkg == null ? "打开抖音（未安装）" : "打开" + douyinName(dyPkg));
+        openDouyin.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // 每次点击重查：新装/卸载抖音都能即时反映
+                String pkg = findDouyin();
+                if (pkg == null) {
+                    openDouyin.setText("打开抖音（未安装）");
+                    Toast.makeText(MainActivity.this,
+                            "没找到抖音 / 抖音极速版，请先安装", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                openDouyin.setText("打开" + douyinName(pkg));
+                Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+                if (launch == null) {
+                    Toast.makeText(MainActivity.this,
+                            "启动失败：系统没有返回启动入口", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    startActivity(launch);
+                    EventLog.add("手动打开 " + douyinName(pkg));
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "启动失败：" + e, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+        root.addView(openDouyin);
+
+        TextView dyTip = new TextView(this);
+        dyTip.setTextSize(12);
+        dyTip.setTextColor(Color.parseColor("#666666"));
+        dyTip.setText("识别开着时点这里进抖音，手势/表情照样生效（极速版优先，没装极速版就开正式版）");
+        root.addView(dyTip);
+
         // ---- 识别方式：手势 / 表情（互斥）----
         TextView modeTitle = new TextView(this);
         modeTitle.setText("识别方式（二选一）：");
@@ -316,7 +357,8 @@ public class MainActivity extends Activity {
         TextView gTip = new TextView(this);
         gTip.setTextSize(12);
         gTip.setTextColor(Color.parseColor("#666666"));
-        gTip.setText("手抬到脸旁、掌心朝镜头、离 30~60cm，手指张开伸直。握拳（0 根）不触发。\n"
+        gTip.setText("支持的动作（5 种）：1 根 / 2 根 / 3 根 / 4 根 / 5 根手指，两个方向各自任选。"
+                + "手抬到脸旁、掌心朝镜头、离 30~60cm，手指张开伸直；握拳（0 根）不触发。\n"
                 + "右侧「阈值」= 手部检测置信度：调低更容易检测到手（更灵敏，也更容易误判）。"
                 + "改完需「停止识别」再「开启识别」才生效。");
         root.addView(gTip);
@@ -336,10 +378,13 @@ public class MainActivity extends Activity {
         TextView fTip = new TextView(this);
         fTip.setTextSize(12);
         fTip.setTextColor(Color.parseColor("#666666"));
-        fTip.setText("可选 8 种：张嘴 / 露牙笑 / 龇牙 / 撅嘴 / 鼓腮 / 抬眉 / 眯眼 / 睁大眼（两个方向各自任选）。"
-                + "切换动作时右侧「阈值」会自动填成该动作的推荐值；难触发调低 0.05，容易误触发调高 0.05。"
+        fTip.setText("两个方向各自任选一种（可以选同一个）。切换动作时右侧「阈值」会自动填成该动作的推荐值；"
+                + "难触发调低 0.05，容易误触发调高 0.05。"
                 + "日志会显示实时分数（如「露牙笑 0.38/0.45」），照着调最准。");
         root.addView(fTip);
+
+        // v5.5：把支持的动作全部摊开列出来（下拉不展开根本看不到有哪些）
+        root.addView(faceCatalogCard());
 
         root.addView(actionRow("下一个", "face_next", FACE_ACTIONS, "jawOpen", "face_prev",
                 "face_th_next", 0.55f, 0.05f, 0.95f));
@@ -927,6 +972,135 @@ public class MainActivity extends Activity {
             previewBitmap.recycle();
             previewBitmap = null;
         }
+    }
+
+    // ---------------- v5.4：一键启动抖音 ----------------
+
+    /** 抖音极速版（日常使用，优先） */
+    private static final String PKG_DOUYIN_LITE = "com.ss.android.ugc.aweme.lite";
+    /** 抖音正式版 */
+    private static final String PKG_DOUYIN = "com.ss.android.ugc.aweme";
+
+    /**
+     * 找可启动的抖音：极速版优先，其次正式版；都没装返回 null。
+     * 注意 Android 11+ 必须在 manifest 的 &lt;queries&gt; 里声明这两个包名，
+     * 否则 getLaunchIntentForPackage 一律返回 null，装了也认不出。
+     */
+    private String findDouyin() {
+        PackageManager pm = getPackageManager();
+        if (pm.getLaunchIntentForPackage(PKG_DOUYIN_LITE) != null) {
+            return PKG_DOUYIN_LITE;
+        }
+        if (pm.getLaunchIntentForPackage(PKG_DOUYIN) != null) {
+            return PKG_DOUYIN;
+        }
+        return null;
+    }
+
+    private static String douyinName(String pkg) {
+        return PKG_DOUYIN_LITE.equals(pkg) ? "抖音极速版" : "抖音";
+    }
+
+    /**
+     * v5.5：「支持哪些动作」全部列出来。
+     * 下拉不展开就看不到清单，用户不知道还有什么能用，这里直接摊在界面上：
+     * 动作名 + 怎么做 + 推荐阈值（推荐值就是切动作时自动填入的那个数）。
+     */
+    private View faceCatalogCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundColor(Color.parseColor("#F4F5F7"));
+        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(4);
+        card.setLayoutParams(lp);
+
+        card.addView(catalogHead("支持的全部表情动作（共 8 种）："));
+        for (String[] a : FACE_ACTIONS) {
+            card.addView(catalogRow(a[0], faceHint(a[1]), "推荐 " + a[2]));
+        }
+
+        TextView note = new TextView(this);
+        note.setTextSize(11);
+        note.setTextColor(Color.parseColor("#888888"));
+        note.setPadding(0, dp(6), 0, 0);
+        note.setText("「推荐」= 实测比较好触发的阈值，切换动作时自动填进右侧输入框，也可以自己改。"
+                + "两个方向可以选同一个动作，各用各的阈值。");
+        card.addView(note);
+        return card;
+    }
+
+    /** 每个表情动作「怎么做」的一句话说明，键名与 FACE_ACTIONS 第二列一致 */
+    private static String faceHint(String key) {
+        if ("jawOpen".equals(key)) {
+            return "张开嘴（像说「啊」）";
+        }
+        if ("mouthSmile".equals(key)) {
+            return "咧嘴笑，两边嘴角上扬";
+        }
+        if ("teethBare".equals(key)) {
+            return "上唇上提 + 下唇下拉，露出上下牙";
+        }
+        if ("mouthPucker".equals(key)) {
+            return "嘴唇向前收拢（嘟嘴 / 亲嘴）";
+        }
+        if ("cheekPuff".equals(key)) {
+            return "腮帮鼓起（嘴里含气）";
+        }
+        if ("browInnerUp".equals(key)) {
+            return "眉毛内侧往上抬（惊讶）";
+        }
+        if ("eyeSquint".equals(key)) {
+            return "眼睛眯成一条缝";
+        }
+        if ("eyeWide".equals(key)) {
+            return "眼睛睁大瞪圆";
+        }
+        return "";
+    }
+
+    private TextView catalogHead(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(12);
+        t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        t.setTextColor(Color.parseColor("#333333"));
+        t.setPadding(0, 0, 0, dp(4));
+        return t;
+    }
+
+    private View catalogRow(String name, String desc, String th) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(3), 0, dp(3));
+
+        TextView n = new TextView(this);
+        n.setText(name);
+        n.setTextSize(13);
+        n.setTextColor(Color.parseColor("#1A1A1A"));
+        n.setLayoutParams(new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
+        row.addView(n);
+
+        TextView d = new TextView(this);
+        d.setText(desc);
+        d.setTextSize(11);
+        d.setTextColor(Color.parseColor("#666666"));
+        d.setLayoutParams(new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f));
+        row.addView(d);
+
+        TextView t = new TextView(this);
+        t.setText(th);
+        t.setTextSize(11);
+        t.setTextColor(Color.parseColor("#00796B"));
+        t.setGravity(Gravity.END);
+        t.setLayoutParams(new LinearLayout.LayoutParams(dp(56),
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        row.addView(t);
+        return row;
     }
 
     private int dp(int v) {
