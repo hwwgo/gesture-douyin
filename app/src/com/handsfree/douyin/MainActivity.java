@@ -5,8 +5,10 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
-import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -30,21 +32,65 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * v4.0：手势切抖音（纯前置摄像头版）。
+ * v5.6：手势切抖音（纯前置摄像头版）。
  *
- * 已删除全部语音功能（口令、Vosk/KWS 引擎、麦克风权限、连续触发熔断）。
- * 只保留：视觉方式（手势/表情）、表情动作自定义、冷却、执行通道、反馈开关、日志。
+ * 界面按「卡片 + 可折叠分组」重做：首屏只有状态、主控按钮和分组入口，
+ * 详细设置全部收进折叠区，避免一打开就是一大段说明文字和一堆开关混在一起。
+ *
+ * 功能与 v5.5 一致：视觉方式（手势/表情）、表情动作自定义、冷却、执行通道、反馈开关、日志。
+ * 新增：「停止识别并退出」——停掉识别服务并关闭界面。
  */
 public class MainActivity extends Activity {
 
     private static final String PREF = "hf";
 
+    // ---------------- 配色 ----------------
+    private static final int C_BG = 0xFFF3F4F6;
+    private static final int C_CARD = 0xFFFFFFFF;
+    private static final int C_TEXT = 0xFF16181D;
+    private static final int C_SUB = 0xFF8A8F99;
+    private static final int C_LINE = 0xFFEDEFF2;
+    private static final int C_ACCENT = 0xFFFE2C55;
+    private static final int C_GREEN = 0xFF0BBF5E;
+    private static final int C_DANGER = 0xFFE5484D;
+    private static final int C_TRACK = 0xFFF1F2F4;
+
     private SharedPreferences sp;
-    private TextView status;
+
+    // ---------------- 状态卡 ----------------
+    private LinearLayout statusCard;
+    private View stateDot;
+    private TextView stateText;
+    private TextView stateMode;
+    private TextView stateDetail;
+    private TextView stateLast;
+
+    // ---------------- 主控 ----------------
+    private Button startBtn;
+    private Button stopBtn;
+    private Button exitBtn;
+
+    // ---------------- 分组 ----------------
+    private Section secMode;
+    private Section secAction;
+    private Section secTrigger;
+    private Section secShortX;
+    private Section secPreview;
+
+    // ---------------- 其它控件 ----------------
     private ImageView previewImg;
     private Switch previewSwitch;
     private Bitmap previewBitmap;
     private TextView pvRotInfo;
+    private TextView linkStatus;
+    private TextView logText;
+    private TextView segGesture;
+    private TextView segFace;
+    /** 0=未授权 1=未启动 2=识别中，仅在变化时重设状态卡背景 */
+    private int lastStateCode = -1;
+    private final Handler uiHandler = new Handler();
+    private int refreshTick = 0;
+
     /** v4.7：接收引擎预览帧（引擎已在主线程回调，这里直接贴图） */
     private final CameraVisionEngine.PreviewListener previewListener =
             new CameraVisionEngine.PreviewListener() {
@@ -62,12 +108,7 @@ public class MainActivity extends Activity {
                     }
                 }
             };
-    private TextView linkStatus;
-    private TextView logText;
-    private final Handler uiHandler = new Handler();
-    private int refreshTick = 0;
 
-    /** 表情动作选项：显示名 + blendshape 名 */
     /**
      * v5.3：表情动作扩到 8 种，第三列是该动作的**推荐阈值**（切换动作时自动填入）。
      * 「露牙笑」= 左右嘴角上扬均值；「龇牙」= 上唇上提与下唇下拉的较小值。
@@ -102,63 +143,106 @@ public class MainActivity extends Activity {
         CameraVisionEngine.previewRotationExtra = sp.getInt("preview_rot_extra", 0);
         CameraVisionEngine.zoomFactor = sp.getFloat("zoom_factor", 1.0f);
 
+        // 去掉系统标题栏后，把状态栏/导航栏刷成同一底色 + 深色图标，避免顶部一条深色横条
+        getWindow().setStatusBarColor(C_BG);
+        getWindow().setNavigationBarColor(C_BG);
+        int vis = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Build.VERSION.SDK_INT >= 26) {
+            vis |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        getWindow().getDecorView().setSystemUiVisibility(vis);
+
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(C_BG);
+        sv.setFillViewport(true);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(16);
-        root.setPadding(pad, pad, pad, pad);
-        ScrollView sv = new ScrollView(this);
-        sv.addView(root);
+        root.setPadding(dp(16), dp(10), dp(16), dp(24));
+        sv.addView(root, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
         setContentView(sv);
 
-        TextView title = new TextView(this);
-        title.setText("手势切抖音 · 前置摄像头版");
-        title.setTextSize(22);
-        title.setGravity(Gravity.CENTER);
-        title.setPadding(0, dp(10), 0, dp(2));
-        root.addView(title);
+        buildHeader(root);
+        buildStatusCard(root);
+        buildControls(root);
+        buildDouyinCard(root);
 
-        TextView sub = new TextView(this);
-        sub.setText("对着前置摄像头比个手势或做个表情，抖音自动翻页\n"
-                + "本 App 不使用麦克风、不使用 root，只负责识别 + 发命令给 ShortX");
-        sub.setTextSize(12);
-        sub.setTextColor(Color.parseColor("#666666"));
-        sub.setGravity(Gravity.CENTER);
-        sub.setPadding(0, 0, 0, dp(10));
-        root.addView(sub);
+        buildModeSection(root);
+        buildActionSection(root);
+        buildTriggerSection(root);
+        buildShortXSection(root);
+        buildPreviewSection(root);
+        buildLogSection(root);
+        buildDebugSection(root);
 
-        status = new TextView(this);
-        status.setTextSize(13);
-        status.setBackgroundColor(Color.parseColor("#F4F6F8"));
-        status.setPadding(dp(10), dp(10), dp(10), dp(10));
-        root.addView(status);
+        TextView footer = text("v5.6 · 前置摄像头识别 · 不使用麦克风 / root", 11, C_SUB, false);
+        footer.setGravity(Gravity.CENTER);
+        footer.setPadding(0, dp(10), 0, 0);
+        root.addView(footer);
 
-        // ---- 测试 ----
-        LinearLayout testRow = new LinearLayout(this);
-        testRow.setOrientation(LinearLayout.HORIZONTAL);
-        testRow.setPadding(0, dp(8), 0, 0);
-        Button tNext = new Button(this);
-        tNext.setText("测试「下一个」");
-        tNext.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Trigger.next(MainActivity.this, "测试按钮", verdictListener());
-            }
-        });
-        Button tPrev = new Button(this);
-        tPrev.setText("测试「上一个」");
-        tPrev.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Trigger.prev(MainActivity.this, "测试按钮", verdictListener());
-            }
-        });
-        testRow.addView(tNext);
-        testRow.addView(tPrev);
-        root.addView(testRow);
+        refresh();
+    }
 
-        Button start = new Button(this);
-        start.setText("开启识别");
-        start.setOnClickListener(new View.OnClickListener() {
+    // ==================== 各区块 ====================
+
+    private void buildHeader(LinearLayout root) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(4), dp(8), dp(4), dp(14));
+        root.addView(box);
+
+        TextView t = text("手势切抖音", 25, C_TEXT, true);
+        box.addView(t);
+
+        TextView s = text("前置摄像头 · 比手势或做表情，抖音自动翻页", 12, C_SUB, false);
+        s.setPadding(0, dp(3), 0, 0);
+        box.addView(s);
+    }
+
+    private void buildStatusCard(LinearLayout root) {
+        statusCard = new LinearLayout(this);
+        statusCard.setOrientation(LinearLayout.VERTICAL);
+        statusCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        statusCard.setBackground(roundRect(C_CARD, 16, C_LINE, 1));
+        statusCard.setElevation(dp(1));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(12);
+        statusCard.setLayoutParams(lp);
+        root.addView(statusCard);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        statusCard.addView(row);
+
+        stateDot = new View(this);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(9), dp(9));
+        dotLp.rightMargin = dp(9);
+        stateDot.setLayoutParams(dotLp);
+        stateDot.setBackground(circle(0xFFC7CBD1));
+        row.addView(stateDot);
+
+        stateText = text("未启动", 17, C_TEXT, true);
+        stateText.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(stateText);
+
+        stateMode = text("表情模式", 12, C_SUB, false);
+        row.addView(stateMode);
+
+        stateDetail = text("", 12, C_SUB, false);
+        stateDetail.setPadding(0, dp(6), 0, 0);
+        statusCard.addView(stateDetail);
+
+        stateLast = text("", 12, 0xFF44484F, false);
+        stateLast.setPadding(0, dp(4), 0, 0);
+        statusCard.addView(stateLast);
+    }
+
+    private void buildControls(LinearLayout root) {
+        startBtn = primaryButton("开启识别");
+        startBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 if (Build.VERSION.SDK_INT >= 23
@@ -178,25 +262,65 @@ public class MainActivity extends Activity {
                 refresh();
             }
         });
-        root.addView(start);
 
-        Button stop = new Button(this);
-        stop.setText("停止识别");
-        stop.setOnClickListener(new View.OnClickListener() {
+        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(54));
+        startLp.bottomMargin = dp(10);
+        startBtn.setLayoutParams(startLp);
+        root.addView(startBtn);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rowLp.bottomMargin = dp(12);
+        row.setLayoutParams(rowLp);
+        root.addView(row);
+
+        stopBtn = ghostButton("停止识别");
+        stopBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 stopService(new Intent(MainActivity.this, VisionService.class));
                 refresh();
             }
         });
-        root.addView(stop);
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        lp1.rightMargin = dp(10);
+        stopBtn.setLayoutParams(lp1);
+        row.addView(stopBtn);
 
-        // ---- v5.4：一键打开抖音（识别开着的话，进去就能用手势/表情控制）----
-        // 极速版优先（日常用的就是它），没装极速版就开正式版。
-        // 按钮不禁用：中途装了抖音回来点一下就能纠正文案，不用重启 App。
+        // v5.6：停止识别并退出——先停服务，再关闭界面
+        exitBtn = softDangerButton("停止识别并退出");
+        exitBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                stopService(new Intent(MainActivity.this, VisionService.class));
+                Toast.makeText(MainActivity.this, "已停止识别，正在退出", Toast.LENGTH_SHORT).show();
+                finish();
+            }
+        });
+        exitBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1f));
+        row.addView(exitBtn);
+    }
+
+    private void buildDouyinCard(LinearLayout root) {
         final String dyPkg = findDouyin();
         final Button openDouyin = new Button(this);
+        openDouyin.setAllCaps(false);
         openDouyin.setText(dyPkg == null ? "打开抖音（未安装）" : "打开" + douyinName(dyPkg));
+        openDouyin.setTextSize(15);
+        openDouyin.setTextColor(C_ACCENT);
+        openDouyin.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        openDouyin.setBackground(roundRect(0xFFFFF0F3, 14, 0xFFFFD6DE, 1));
+        openDouyin.setMinHeight(0);
+        openDouyin.setMinimumHeight(0);
+        openDouyin.setMinWidth(0);
+        openDouyin.setMinimumWidth(0);
+        openDouyin.setStateListAnimator(null);
+        openDouyin.setPadding(dp(16), 0, dp(16), 0);
+        openDouyin.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
         openDouyin.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -226,97 +350,81 @@ public class MainActivity extends Activity {
         });
         root.addView(openDouyin);
 
-        TextView dyTip = new TextView(this);
-        dyTip.setTextSize(12);
-        dyTip.setTextColor(Color.parseColor("#666666"));
-        dyTip.setText("识别开着时点这里进抖音，手势/表情照样生效（极速版优先，没装极速版就开正式版）");
-        root.addView(dyTip);
+        TextView hint = text("识别开着时点这里进抖音，手势 / 表情照样生效（极速版优先）", 11, C_SUB, false);
+        hint.setPadding(dp(4), dp(6), dp(4), dp(12));
+        root.addView(hint);
+    }
 
-        // ---- 识别方式：手势 / 表情（互斥）----
-        TextView modeTitle = new TextView(this);
-        modeTitle.setText("识别方式（二选一）：");
-        modeTitle.setTextSize(15);
-        modeTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(modeTitle);
+    private void buildModeSection(LinearLayout root) {
+        secMode = addSection(root, "识别方式");
+        LinearLayout body = secMode.body;
 
-        TextView modeTip = new TextView(this);
-        modeTip.setTextSize(12);
-        modeTip.setTextColor(Color.parseColor("#666666"));
-        modeTip.setText("手机斜靠台面、正对自己；5fps 采样、约 0.5~0.8 秒响应、耗电约 1W，"
-                + "状态栏会亮摄像头绿点；**息屏会自动停止识别**（等同手动停止，亮屏后不自动恢复）。切换后请「停止识别」再「开启识别」。");
-        root.addView(modeTip);
+        segGesture = segmentItem("手势");
+        segFace = segmentItem("面部表情");
+        LinearLayout seg = new LinearLayout(this);
+        seg.setOrientation(LinearLayout.HORIZONTAL);
+        seg.setBackground(roundRect(C_TRACK, 12, 0, 0));
+        seg.setPadding(dp(4), dp(4), dp(4), dp(4));
+        LinearLayout.LayoutParams sg = new LinearLayout.LayoutParams(0, dp(38), 1f);
+        sg.rightMargin = dp(4);
+        seg.addView(segGesture, sg);
+        seg.addView(segFace, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        body.addView(seg);
 
         // 首次使用默认「表情」模式（张嘴比比手势更省事）
         if (!sp.contains("face_ctrl") && !sp.contains("gesture_cam")) {
             sp.edit().putBoolean("face_ctrl", true).putBoolean("gesture_cam", false).apply();
         }
-        final Switch gestureSwitch = new Switch(this);
-        gestureSwitch.setChecked(sp.getBoolean("gesture_cam", false));
-        final Switch faceSwitch = new Switch(this);
-        faceSwitch.setChecked(sp.getBoolean("face_ctrl", true));
-        gestureSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+        segGesture.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onCheckedChanged(android.widget.CompoundButton bv, boolean checked) {
-                sp.edit().putBoolean("gesture_cam", checked).apply();
-                if (checked) {
-                    sp.edit().putBoolean("face_ctrl", false).apply();
-                    faceSwitch.setChecked(false);
-                }
-                refresh();
+            public void onClick(View v) {
+                setFaceMode(false);
             }
         });
-        faceSwitch.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+        segFace.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onCheckedChanged(android.widget.CompoundButton bv, boolean checked) {
-                sp.edit().putBoolean("face_ctrl", checked).apply();
-                if (checked) {
-                    sp.edit().putBoolean("gesture_cam", false).apply();
-                    gestureSwitch.setChecked(false);
-                }
-                refresh();
+            public void onClick(View v) {
+                setFaceMode(true);
             }
         });
-        root.addView(switchRow("手势（数手指数，动作在下方自定义）", gestureSwitch));
-        root.addView(switchRow("面部表情（张嘴 / 撅嘴，动作在下方自定义）", faceSwitch));
+        applyModeSegment();
 
-        // ---- 高精度模式（v4.6）----
-        root.addView(switchRow("高精度模式（960×720 采集，识别更准、耗电略增；切换后需重开识别）",
-                "high_accuracy", false));
+        TextView tip = hint("手机斜靠台面正对自己；5fps 采样、约 0.5~0.8 秒响应。"
+                + "息屏会自动停止识别（等同手动停止，亮屏后不自动恢复）。切换后请「停止识别」再「开启识别」。");
+        tip.setPadding(0, dp(10), 0, 0);
+        body.addView(tip);
 
-        TextView hdTip = new TextView(this);
-        hdTip.setTextSize(12);
-        hdTip.setTextColor(Color.parseColor("#666666"));
-        hdTip.setText("开启后摄像头按 960×720 采集（像素量 2.2 倍）：手离得远、手指细节、光线偏暗时"
-                + "更容易认对；代价是 CPU 占用和耗电上升。日志会写「采集分辨率 960×720（高精度模式）」"
-                + "以确认生效。机型不支持该分辨率时会自动选最接近的尺寸。");
-        root.addView(hdTip);
+        body.addView(divider());
 
-        // ---- 画面放大（v5.1）----
-        LinearLayout zmRow = new LinearLayout(this);
-        zmRow.setOrientation(LinearLayout.HORIZONTAL);
-        zmRow.setGravity(Gravity.CENTER_VERTICAL);
-        zmRow.setPadding(0, dp(10), 0, 0);
-        TextView zmLabel = new TextView(this);
-        zmLabel.setText("画面放大");
-        zmLabel.setTextSize(14);
+        body.addView(switchRow("高精度模式", "high_accuracy", false));
+        TextView hdTip = hint("按 960×720 采集（像素量 2.2 倍）：手离得远、光线偏暗时更容易认对，代价是耗电上升。"
+                + "改完需重开识别。");
+        body.addView(hdTip);
+
+        body.addView(divider());
+
+        LinearLayout zmHead = new LinearLayout(this);
+        zmHead.setOrientation(LinearLayout.HORIZONTAL);
+        zmHead.setGravity(Gravity.CENTER_VERTICAL);
+        body.addView(zmHead);
+
+        TextView zmLabel = text("画面放大", 14, C_TEXT, false);
         zmLabel.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        zmRow.addView(zmLabel);
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        zmHead.addView(zmLabel);
 
-        final TextView zmVal = new TextView(this);
-        zmVal.setTextSize(14);
+        final TextView zmVal = text(String.format(java.util.Locale.US, "%.1fx",
+                sp.getFloat("zoom_factor", 1.0f)), 14, C_ACCENT, true);
         zmVal.setGravity(Gravity.END);
-        zmVal.setLayoutParams(new LinearLayout.LayoutParams(
-                dp(52), LinearLayout.LayoutParams.WRAP_CONTENT));
-        zmVal.setText(String.format(java.util.Locale.US, "%.1fx",
-                sp.getFloat("zoom_factor", 1.0f)));
+        zmHead.addView(zmVal);
 
         SeekBar zmBar = new SeekBar(this);
         float z0 = sp.getFloat("zoom_factor", 1.0f);
         zmBar.setMax(30); // 1.0 ~ 4.0，步长 0.1
         zmBar.setProgress(Math.round((z0 - 1.0f) * 10));
+        zmBar.setPadding(0, dp(4), 0, dp(4));
         zmBar.setLayoutParams(new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         zmBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
@@ -334,76 +442,56 @@ public class MainActivity extends Activity {
             public void onStopTrackingTouch(SeekBar sb) {
             }
         });
-        zmRow.addView(zmBar);
-        zmRow.addView(zmVal);
-        root.addView(zmRow);
+        body.addView(zmBar);
 
-        TextView zmTip = new TextView(this);
-        zmTip.setTextSize(12);
-        zmTip.setTextColor(Color.parseColor("#666666"));
-        zmTip.setText("手机离得远就把它调大：只取画面中心那块放大，人脸和手在识别模型里会更大、更容易认；"
-                + "代价是视野变窄（2.0x 时只剩中心 1/4 面积、4.0x 时只剩 1/16）。"
-                + "超过 3x 画面会明显变糊（数字放大，不增加真实细节），建议优先挪近手机、再用放大微调。"
-                + "拖动即时生效，打开「摄像头预览」能直接看到放大后的构图。");
-        root.addView(zmTip);
+        body.addView(hint("离得远就调大：只取画面中心放大，人脸和手在模型里更大、更容易认，"
+                + "代价是视野变窄（2.0x 只剩中心 1/4）。超过 3x 会明显变糊，建议先挪近再微调。"));
+    }
 
-        // ---- 手势动作（v4.3：手指数 + 阈值）----
-        TextView gTitle = new TextView(this);
-        gTitle.setText("手势动作（伸几根手指，保持 0.4 秒触发）：");
-        gTitle.setTextSize(15);
-        gTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(gTitle);
+    private void buildActionSection(LinearLayout root) {
+        secAction = addSection(root, "动作设置");
+        LinearLayout body = secAction.body;
 
-        TextView gTip = new TextView(this);
-        gTip.setTextSize(12);
-        gTip.setTextColor(Color.parseColor("#666666"));
-        gTip.setText("支持的动作（5 种）：1 根 / 2 根 / 3 根 / 4 根 / 5 根手指，两个方向各自任选。"
-                + "手抬到脸旁、掌心朝镜头、离 30~60cm，手指张开伸直；握拳（0 根）不触发。\n"
-                + "右侧「阈值」= 手部检测置信度：调低更容易检测到手（更灵敏，也更容易误判）。"
-                + "改完需「停止识别」再「开启识别」才生效。");
-        root.addView(gTip);
-
-        root.addView(actionRow("下一个", "gesture_next", FINGER_ACTIONS, "1", "gesture_prev",
+        body.addView(subTitle("手势动作"));
+        body.addView(hint("伸 1~5 根手指并保持 0.4 秒。手抬到脸旁、掌心朝镜头、离 30~60cm，握拳不触发。"
+                + "右侧「阈值」是手部检测置信度，调低更灵敏也更容易误判。"));
+        body.addView(actionRow("下一个", "gesture_next", FINGER_ACTIONS, "1", "gesture_prev",
                 "gesture_th", 0.35f, 0.10f, 0.90f));
-        root.addView(actionRow("上一个", "gesture_prev", FINGER_ACTIONS, "2", "gesture_next",
+        body.addView(actionRow("上一个", "gesture_prev", FINGER_ACTIONS, "2", "gesture_next",
                 "gesture_th", 0.35f, 0.10f, 0.90f));
 
-        // ---- 表情动作（v4.3：动作 + 阈值）----
-        TextView actTitle = new TextView(this);
-        actTitle.setText("表情动作（两种任选，保持 0.5 秒触发）：");
-        actTitle.setTextSize(15);
-        actTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(actTitle);
+        body.addView(divider());
 
-        TextView fTip = new TextView(this);
-        fTip.setTextSize(12);
-        fTip.setTextColor(Color.parseColor("#666666"));
-        fTip.setText("两个方向各自任选一种（可以选同一个）。切换动作时右侧「阈值」会自动填成该动作的推荐值；"
-                + "难触发调低 0.05，容易误触发调高 0.05。"
-                + "日志会显示实时分数（如「露牙笑 0.38/0.45」），照着调最准。");
-        root.addView(fTip);
-
-        // v5.5：把支持的动作全部摊开列出来（下拉不展开根本看不到有哪些）
-        root.addView(faceCatalogCard());
-
-        root.addView(actionRow("下一个", "face_next", FACE_ACTIONS, "jawOpen", "face_prev",
+        body.addView(subTitle("表情动作"));
+        body.addView(hint("保持 0.5 秒触发，两个方向可各选一种（也能相同）。切换动作时阈值会自动填成推荐值；"
+                + "难触发调低 0.05，容易误触发调高 0.05。日志会显示实时分数。"));
+        body.addView(faceCatalogCard());
+        body.addView(actionRow("下一个", "face_next", FACE_ACTIONS, "jawOpen", "face_prev",
                 "face_th_next", 0.55f, 0.05f, 0.95f));
-        root.addView(actionRow("上一个", "face_prev", FACE_ACTIONS, "mouthPucker", "face_next",
+        body.addView(actionRow("上一个", "face_prev", FACE_ACTIONS, "mouthPucker", "face_next",
                 "face_th_prev", 0.50f, 0.05f, 0.95f));
+    }
 
-        // ---- 冷却 ----
-        TextView cdLabel = new TextView(this);
-        cdLabel.setText("触发冷却（秒）：两次翻页之间的最短间隔");
-        cdLabel.setTextSize(13);
-        cdLabel.setPadding(0, dp(12), 0, dp(2));
-        root.addView(cdLabel);
+    private void buildTriggerSection(LinearLayout root) {
+        secTrigger = addSection(root, "触发与反馈");
+        LinearLayout body = secTrigger.body;
+
+        body.addView(subTitle("触发冷却"));
+        body.addView(hint("两次翻页之间的最短间隔。调小可更快连续翻页，0 = 不冷却。"));
         final EditText etCooldown = new EditText(this);
         etCooldown.setText(String.format(java.util.Locale.US, "%g",
                 sp.getLong("cooldown_ms", 1500) / 1000.0));
         etCooldown.setTextSize(13);
         etCooldown.setSingleLine(true);
+        etCooldown.setGravity(Gravity.CENTER_VERTICAL);
         etCooldown.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        etCooldown.setHint("秒，默认 1.5；调小可更快连续翻页，0 = 不冷却");
+        etCooldown.setHint("秒，默认 1.5");
+        etCooldown.setBackground(roundRect(C_TRACK, 10, 0, 0));
+        etCooldown.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout.LayoutParams cdLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cdLp.topMargin = dp(6);
+        etCooldown.setLayoutParams(cdLp);
         etCooldown.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {
@@ -428,117 +516,51 @@ public class MainActivity extends Activity {
                     ms = 60000;
                 }
                 sp.edit().putLong("cooldown_ms", ms).apply();
+                if (secTrigger != null) {
+                    secTrigger.summary("冷却 " + String.format(java.util.Locale.US, "%g", ms / 1000.0) + "s");
+                }
             }
         });
-        root.addView(etCooldown);
+        body.addView(etCooldown);
 
-        // ---- 执行通道（v4.4：只保留 DeepLink，通知触发已删除）----
-        TextView chTitle = new TextView(this);
-        chTitle.setText("执行通道：ShortX DeepLink");
-        chTitle.setTextSize(15);
-        chTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(chTitle);
+        body.addView(divider());
 
-        TextView chTip = new TextView(this);
-        chTip.setTextSize(12);
-        chTip.setTextColor(Color.parseColor("#666666"));
-        chTip.setText("翻页命令通过 shortx:// 链接交给 ShortX 执行，需要：① ShortX 已安装并在 LSPosed 启用；"
-                + "② 本 App 有「后台弹出界面」或「悬浮窗」权限。（v4.4 起移除了通知触发通道）");
-        root.addView(chTip);
+        body.addView(switchRow("震动", "fb_vibrate", true));
+        body.addView(hint("识别到动作两短震、拉起 ShortX 单击、失败长震。"));
+    }
+
+    private void buildShortXSection(LinearLayout root) {
+        secShortX = addSection(root, "ShortX 执行通道");
+        LinearLayout body = secShortX.body;
+
+        body.addView(hint("翻页命令通过 shortx:// 链接交给 ShortX 执行，需要：① ShortX 已安装并在 LSPosed 启用；"
+                + "② 本 App 有「后台弹出界面」或「悬浮窗」权限。"));
 
         // 固定为 deeplink（兼容老配置里残留的 notify）
         if (!"deeplink".equals(sp.getString("exec_channel", ""))) {
             sp.edit().putString("exec_channel", "deeplink").apply();
         }
 
-        // DeepLink 链接输入框
-        TextView dlLabel = new TextView(this);
-        dlLabel.setText("DeepLink 链接（规则重导后 id 会变，改了要同步）：");
-        dlLabel.setTextSize(13);
-        dlLabel.setPadding(0, dp(8), 0, dp(2));
-        root.addView(dlLabel);
+        body.addView(subTitle("「下一个」链接"));
+        final EditText etNextUrl = urlField("shortx_url_next", "shortx://run?id=DA-xxxx");
+        body.addView(etNextUrl);
 
-        final EditText etNextUrl = new EditText(this);
-        etNextUrl.setText(sp.getString("shortx_url_next", ""));
-        etNextUrl.setTextSize(12);
-        etNextUrl.setSingleLine(true);
-        etNextUrl.setHint("「下一个」链接，如 shortx://run?id=DA-xxxx");
-        etNextUrl.addTextChangedListener(new TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
+        body.addView(subTitle("「上一个」链接"));
+        final EditText etPrevUrl = urlField("shortx_url_prev", "shortx://run?id=DA-yyyy");
+        body.addView(etPrevUrl);
 
-            @Override
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-            }
+        linkStatus = text("", 12, C_SUB, false);
+        linkStatus.setPadding(0, dp(10), 0, 0);
+        body.addView(linkStatus);
+    }
 
-            @Override
-            public void afterTextChanged(Editable s) {
-                sp.edit().putString("shortx_url_next", s.toString().trim()).apply();
-            }
-        });
-        root.addView(etNextUrl);
-
-        final EditText etPrevUrl = new EditText(this);
-        etPrevUrl.setText(sp.getString("shortx_url_prev", ""));
-        etPrevUrl.setTextSize(12);
-        etPrevUrl.setSingleLine(true);
-        etPrevUrl.setHint("「上一个」链接，如 shortx://run?id=DA-yyyy");
-        etPrevUrl.addTextChangedListener(new TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void afterTextChanged(Editable s) {
-                sp.edit().putString("shortx_url_prev", s.toString().trim()).apply();
-            }
-        });
-        root.addView(etPrevUrl);
-
-        linkStatus = new TextView(this);
-        linkStatus.setTextSize(12);
-        linkStatus.setPadding(0, dp(4), 0, 0);
-        root.addView(linkStatus);
-
-        // ---- 反馈（v4.5：只剩震动）----
-        TextView fbTitle = new TextView(this);
-        fbTitle.setText("反馈（成功识别到动作时）：");
-        fbTitle.setTextSize(15);
-        fbTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(fbTitle);
-        root.addView(switchRow("震动", "fb_vibrate", true));
-
-        TextView fbTip = new TextView(this);
-        fbTip.setTextSize(12);
-        fbTip.setTextColor(Color.parseColor("#666666"));
-        fbTip.setText("识别到动作两短震、拉起 ShortX 单击、失败长震。**息屏即停止识别**（等同于手动点「停止识别」，通知也会消失），下次使用重新点「开启识别」即可。");
-        root.addView(fbTip);
-
-        // ---- 授权 ----
-        Button grantCam = new Button(this);
-        grantCam.setText("授予摄像头权限（必须）");
-        grantCam.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                requestPermissions(new String[]{Manifest.permission.CAMERA}, 3);
-            }
-        });
-        root.addView(grantCam);
-
-        // ---- 摄像头预览（v4.7，调试用）----
-        TextView pvTitle = new TextView(this);
-        pvTitle.setText("摄像头预览（调手机角度/光线时用）：");
-        pvTitle.setTextSize(15);
-        pvTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(pvTitle);
+    private void buildPreviewSection(LinearLayout root) {
+        secPreview = addSection(root, "摄像头预览");
+        LinearLayout body = secPreview.body;
 
         previewSwitch = new Switch(this);
         previewSwitch.setChecked(false);
+        styleSwitch(previewSwitch);
         previewSwitch.setOnCheckedChangeListener(
                 new android.widget.CompoundButton.OnCheckedChangeListener() {
                     @Override
@@ -554,43 +576,41 @@ public class MainActivity extends Activity {
                             CameraVisionEngine.previewListener = null;
                             clearPreview();
                         }
+                        if (secPreview != null) {
+                            secPreview.summary(on ? "已开启" : "关闭");
+                        }
                     }
                 });
-        root.addView(switchRow("显示摄像头画面（识别照常运行，每 0.2 秒一帧）", previewSwitch));
-
-        TextView pvTip = new TextView(this);
-        pvTip.setTextSize(12);
-        pvTip.setTextColor(Color.parseColor("#666666"));
-        pvTip.setText("显示的是识别引擎实际处理的那一帧，不额外开相机，所以不会和识别抢设备。"
-                + "画面为竖屏正立方向、未做镜像（即摄像头真实所见）。");
-        root.addView(pvTip);
+        body.addView(switchRow("显示摄像头画面", previewSwitch));
+        body.addView(hint("显示的是识别引擎实际处理的那一帧，不额外开相机，不会和识别抢设备。"
+                + "画面为竖屏正立方向、未做镜像（摄像头真实所见）。"));
 
         FrameLayout pvBox = new FrameLayout(this);
-        pvBox.setBackgroundColor(Color.BLACK);
+        pvBox.setBackground(roundRect(0xFF000000, 12, 0, 0));
         LinearLayout.LayoutParams pvLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(220));
-        pvLp.topMargin = dp(6);
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(210));
+        pvLp.topMargin = dp(10);
         pvBox.setLayoutParams(pvLp);
         previewImg = new ImageView(this);
         previewImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
         previewImg.setLayoutParams(new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         pvBox.addView(previewImg);
-        root.addView(pvBox);
+        body.addView(pvBox);
 
         // v4.8：画面方向微调（各厂商前置方向定义不同，自动值可能上下颠倒）
         LinearLayout pvRow = new LinearLayout(this);
         pvRow.setOrientation(LinearLayout.HORIZONTAL);
         pvRow.setGravity(Gravity.CENTER_VERTICAL);
-        pvRow.setPadding(0, dp(6), 0, 0);
-        pvRotInfo = new TextView(this);
-        pvRotInfo.setTextSize(12);
-        pvRotInfo.setTextColor(Color.parseColor("#666666"));
+        pvRow.setPadding(0, dp(8), 0, 0);
+        body.addView(pvRow);
+
+        pvRotInfo = text("", 11, C_SUB, false);
         pvRotInfo.setLayoutParams(new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         pvRow.addView(pvRotInfo);
-        Button pvRotBtn = new Button(this);
-        pvRotBtn.setText("画面方向 +90°");
+
+        Button pvRotBtn = smallButton("方向 +90°");
         pvRotBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -611,48 +631,356 @@ public class MainActivity extends Activity {
             }
         });
         pvRow.addView(pvRotBtn);
-        root.addView(pvRow);
         updatePvRotInfo();
-
-        // ---- 日志 ----
-        TextView logTitle = new TextView(this);
-        logTitle.setText("最近识别记录：");
-        logTitle.setTextSize(15);
-        logTitle.setPadding(0, dp(14), 0, dp(2));
-        root.addView(logTitle);
-
-        logText = new TextView(this);
-        logText.setTextSize(11);
-        logText.setTextColor(Color.parseColor("#333333"));
-        logText.setBackgroundColor(Color.parseColor("#FAFAFA"));
-        logText.setPadding(dp(8), dp(8), dp(8), dp(8));
-        root.addView(logText);
-
-        refresh();
     }
 
-    private Trigger.Listener verdictListener() {
-        return new Trigger.Listener() {
+    private void buildLogSection(LinearLayout root) {
+        Section secLog = addSection(root, "最近识别记录");
+        LinearLayout body = secLog.body;
+
+        logText = text("", 11, 0xFF33363C, false);
+        logText.setTypeface(Typeface.MONOSPACE);
+        logText.setLineSpacing(dp(2), 1f);
+        logText.setBackground(roundRect(0xFFFAFBFC, 10, C_LINE, 1));
+        logText.setPadding(dp(10), dp(10), dp(10), dp(10));
+        body.addView(logText);
+
+        Button clear = smallButton("清空记录");
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(dp(96), dp(34));
+        clp.topMargin = dp(10);
+        clp.gravity = Gravity.END;
+        clear.setLayoutParams(clp);
+        clear.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onVerdict(final String text) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
-                    }
-                });
+            public void onClick(View v) {
+                EventLog.clear();
+                if (logText != null) {
+                    logText.setText(EventLog.dump());
+                }
             }
-        };
+        });
+        body.addView(clear);
     }
 
-    /**
-     * 表情动作单选组。两个组不能选同一个动作，冲突时自动回退到本组第一个可用项。
-     */
-    /**
-     * v4.3：一行 = 方向名 + 动作下拉 + 阈值输入框。
-     * key/otherKey 互斥（两个方向不能用同一个动作）；thKey 既可能是表情阈值也可能是手势阈值，
-     * 两行共用同一个 thKey 时，两个输入框显示同一份数值（手势只有一个「检测置信度」）。
-     */
+    private void buildDebugSection(LinearLayout root) {
+        Section secDebug = addSection(root, "调试与权限");
+        LinearLayout body = secDebug.body;
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        body.addView(row);
+
+        Button tNext = smallButton("测试「下一个」");
+        tNext.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Trigger.next(MainActivity.this, "测试按钮", verdictListener());
+            }
+        });
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(40), 1f);
+        lp1.rightMargin = dp(8);
+        tNext.setLayoutParams(lp1);
+        row.addView(tNext);
+
+        Button tPrev = smallButton("测试「上一个」");
+        tPrev.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                Trigger.prev(MainActivity.this, "测试按钮", verdictListener());
+            }
+        });
+        tPrev.setLayoutParams(new LinearLayout.LayoutParams(0, dp(40), 1f));
+        row.addView(tPrev);
+
+        Button grantCam = smallButton("授予摄像头权限（必须）");
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(40));
+        glp.topMargin = dp(10);
+        grantCam.setLayoutParams(glp);
+        grantCam.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestPermissions(new String[]{Manifest.permission.CAMERA}, 3);
+            }
+        });
+        body.addView(grantCam);
+    }
+
+    // ==================== 控件工厂 ====================
+
+    private TextView text(String s, int sizeSp, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(sizeSp);
+        t.setTextColor(color);
+        if (bold) {
+            t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        }
+        return t;
+    }
+
+    private TextView hint(String s) {
+        TextView t = text(s, 12, C_SUB, false);
+        t.setLineSpacing(dp(3), 1f);
+        t.setPadding(0, dp(4), 0, 0);
+        return t;
+    }
+
+    private TextView subTitle(String s) {
+        TextView t = text(s, 13, C_TEXT, true);
+        t.setPadding(0, dp(10), 0, 0);
+        return t;
+    }
+
+    private View divider() {
+        View v = new View(this);
+        v.setBackgroundColor(C_LINE);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+        lp.topMargin = dp(12);
+        lp.bottomMargin = dp(12);
+        v.setLayoutParams(lp);
+        return v;
+    }
+
+    private GradientDrawable roundRect(int color, int radiusDp, int strokeColor, int strokeDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(radiusDp));
+        if (strokeColor != 0) {
+            d.setStroke(Math.max(1, dp(strokeDp)), strokeColor);
+        }
+        return d;
+    }
+
+    private GradientDrawable circle(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(color);
+        return d;
+    }
+
+    private Button primaryButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(17);
+        b.setTextColor(0xFFFFFFFF);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        b.setBackground(roundRect(C_ACCENT, 14, 0, 0));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setStateListAnimator(null);
+        b.setPadding(dp(16), 0, dp(16), 0);
+        return b;
+    }
+
+    private Button ghostButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(15);
+        b.setTextColor(C_TEXT);
+        b.setBackground(roundRect(C_TRACK, 14, 0, 0));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setStateListAnimator(null);
+        b.setPadding(dp(12), 0, dp(12), 0);
+        return b;
+    }
+
+    private Button softDangerButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(15);
+        b.setTextColor(C_DANGER);
+        b.setBackground(roundRect(0xFFFFF1F2, 14, 0xFFFFD9DE, 1));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setStateListAnimator(null);
+        b.setPadding(dp(8), 0, dp(8), 0);
+        return b;
+    }
+
+    private Button smallButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(12);
+        b.setTextColor(0xFF44484F);
+        b.setBackground(roundRect(C_TRACK, 10, 0, 0));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setStateListAnimator(null);
+        b.setPadding(dp(10), 0, dp(10), 0);
+        return b;
+    }
+
+    private TextView segmentItem(String label) {
+        TextView t = text(label, 14, C_SUB, true);
+        t.setGravity(Gravity.CENTER);
+        return t;
+    }
+
+    private void styleSwitch(Switch sw) {
+        sw.setThumbTintList(ColorStateList.valueOf(0xFFFFFFFF));
+        sw.setTrackTintList(new ColorStateList(
+                new int[][]{{android.R.attr.state_checked}, {}},
+                new int[]{C_ACCENT, 0xFFD9DCE1}));
+    }
+
+    private EditText urlField(final String key, String hintText) {
+        final EditText et = new EditText(this);
+        et.setText(sp.getString(key, ""));
+        et.setTextSize(12);
+        et.setSingleLine(true);
+        et.setGravity(Gravity.CENTER_VERTICAL);
+        et.setHint(hintText);
+        et.setBackground(roundRect(C_TRACK, 10, 0, 0));
+        et.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        et.setLayoutParams(lp);
+        et.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                sp.edit().putString(key, s.toString().trim()).apply();
+                refreshChannel();
+            }
+        });
+        return et;
+    }
+
+    // ==================== 折叠分组 ====================
+
+    private class Section {
+        final LinearLayout body;
+        final TextView summaryText;
+        final TextView arrow;
+        boolean open;
+
+        Section(LinearLayout body, TextView summaryText, TextView arrow, boolean open) {
+            this.body = body;
+            this.summaryText = summaryText;
+            this.arrow = arrow;
+            this.open = open;
+        }
+
+        void toggle() {
+            open = !open;
+            body.setVisibility(open ? View.VISIBLE : View.GONE);
+            arrow.setText(open ? "▾" : "▸");
+        }
+
+        void summary(String s) {
+            summaryText.setText(s == null ? "" : s);
+        }
+    }
+
+    private Section addSection(LinearLayout root, String title) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(roundRect(C_CARD, 16, C_LINE, 1));
+        card.setElevation(dp(1));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.bottomMargin = dp(10);
+        card.setLayoutParams(clp);
+        root.addView(card);
+
+        final LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(16), dp(15), dp(16), dp(15));
+        card.addView(head);
+
+        TextView t = text(title, 15, C_TEXT, true);
+        t.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(t);
+
+        final TextView summary = text("", 12, C_SUB, false);
+        head.addView(summary);
+
+        final TextView arrow = text("▸", 12, C_SUB, false);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = dp(8);
+        arrow.setLayoutParams(alp);
+        head.addView(arrow);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(16), 0, dp(16), dp(16));
+        body.setVisibility(View.GONE);
+        card.addView(body);
+
+        final Section sec = new Section(body, summary, arrow, false);
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                sec.toggle();
+            }
+        });
+        return sec;
+    }
+
+    // ==================== 配置行 ====================
+
+    private View switchRow(String label, final String key, boolean def) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(10), 0, dp(6));
+        TextView t = text(label, 14, C_TEXT, false);
+        t.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(t);
+        Switch s = new Switch(this);
+        s.setChecked(sp.getBoolean(key, def));
+        styleSwitch(s);
+        s.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
+                sp.edit().putBoolean(key, isChecked).apply();
+                refresh();
+            }
+        });
+        row.addView(s);
+        return row;
+    }
+
+    private View switchRow(String label, Switch sw) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(8), 0, dp(4));
+        TextView t = text(label, 14, C_TEXT, false);
+        t.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(t);
+        row.addView(sw);
+        return row;
+    }
+
     /**
      * v5.3：一行 = 方向名 + 动作下拉 + 阈值输入框。
      * 下拉切换动作时，若该动作带推荐阈值（opts[pos][2]），自动把阈值填成推荐值并保存——
@@ -665,13 +993,11 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(6));
+        row.setPadding(0, dp(8), 0, dp(8));
 
-        TextView name = new TextView(this);
-        name.setText(label);
-        name.setTextSize(14);
+        TextView name = text(label, 14, C_TEXT, false);
         name.setLayoutParams(new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
+                LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f));
         row.addView(name);
 
         // 阈值输入框先建，下拉回调里要改它
@@ -682,8 +1008,12 @@ public class MainActivity extends Activity {
         th.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         th.setGravity(Gravity.CENTER);
         th.setHint("阈值");
-        th.setLayoutParams(new LinearLayout.LayoutParams(dp(64),
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        th.setBackground(roundRect(C_TRACK, 9, 0, 0));
+        th.setPadding(dp(6), dp(6), dp(6), dp(6));
+        LinearLayout.LayoutParams thLp = new LinearLayout.LayoutParams(dp(62),
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        thLp.leftMargin = dp(8);
+        th.setLayoutParams(thLp);
         th.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence s, int a, int b, int c) {
@@ -726,7 +1056,7 @@ public class MainActivity extends Activity {
             }
         }
         spinner.setLayoutParams(new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1.3f));
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1.5f));
 
         final boolean[] suppress = {false};
         // Spinner 在布局完成后会对「当前选项」回调一次，若不过滤会把用户已调好的阈值
@@ -780,41 +1110,20 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private View switchRow(String label, Switch sw) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(6));
-        TextView t = new TextView(this);
-        t.setText(label);
-        t.setTextSize(14);
-        t.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(t);
-        row.addView(sw);
-        return row;
-    }
+    // ==================== 状态刷新 ====================
 
-    private View switchRow(String label, final String key, boolean def) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(8), 0, dp(8));
-        TextView t = new TextView(this);
-        t.setText(label);
-        t.setTextSize(15);
-        t.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        Switch s = new Switch(this);
-        s.setChecked(sp.getBoolean(key, def));
-        s.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+    private Trigger.Listener verdictListener() {
+        return new Trigger.Listener() {
             @Override
-            public void onCheckedChanged(android.widget.CompoundButton buttonView, boolean isChecked) {
-                sp.edit().putBoolean(key, isChecked).apply();
-                refresh();
+            public void onVerdict(final String text) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
+                    }
+                });
             }
-        });
-        row.addView(t);
-        row.addView(s);
-        return row;
+        };
     }
 
     @Override
@@ -859,49 +1168,125 @@ public class MainActivity extends Activity {
     private void refresh() {
         refreshStatusOnly();
         refreshChannel();
+        refreshSummaries();
         if (logText != null) {
             logText.setText(EventLog.dump());
         }
     }
 
+    private void refreshSummaries() {
+        boolean faceMode = sp.getBoolean("face_ctrl", true);
+        if (secMode != null) {
+            secMode.summary(faceMode ? "面部表情" : "手势");
+        }
+        if (secAction != null) {
+            if (faceMode) {
+                secAction.summary(actionName(sp.getString("face_next", "jawOpen"))
+                        + " / " + actionName(sp.getString("face_prev", "mouthPucker")));
+            } else {
+                secAction.summary(fingerName(sp.getString("gesture_next", "1"))
+                        + " / " + fingerName(sp.getString("gesture_prev", "2")));
+            }
+        }
+        if (secTrigger != null) {
+            secTrigger.summary("冷却 " + String.format(java.util.Locale.US, "%g",
+                    sp.getLong("cooldown_ms", 1500) / 1000.0) + "s"
+                    + (sp.getBoolean("fb_vibrate", true) ? " · 震动" : ""));
+        }
+        if (secPreview != null && previewSwitch != null) {
+            secPreview.summary(previewSwitch.isChecked() ? "已开启" : "关闭");
+        }
+        applyModeSegment();
+    }
+
     private void refreshStatusOnly() {
+        if (stateText == null) {
+            return;
+        }
         boolean camPerm = checkSelfPermission(Manifest.permission.CAMERA)
                 == PackageManager.PERMISSION_GRANTED;
         boolean faceMode = sp.getBoolean("face_ctrl", true);
+        boolean running = camPerm && VisionService.engineReady;
 
-        StringBuilder sb = new StringBuilder("状态：\n");
-        sb.append("· 识别方式：").append(faceMode ? "面部表情" : "手势").append("\n");
-        if (faceMode) {
-            String nAct = actionName(sp.getString("face_next", "jawOpen"));
-            String pAct = actionName(sp.getString("face_prev", "mouthPucker"));
-            float tn = sp.getFloat("face_th_next", 0.55f);
-            float tp = sp.getFloat("face_th_prev", 0.50f);
-            sb.append("· 动作：").append(nAct).append("(").append(fmtTh(tn)).append(") → 下一个，")
-                    .append(pAct).append("(").append(fmtTh(tp)).append(") → 上一个（保持 0.5 秒）\n");
+        int bgColor;
+        int strokeColor;
+        int dotColor;
+        String state;
+        int code;
+        if (!camPerm) {
+            bgColor = 0xFFFFF8F3;
+            strokeColor = 0xFFFFE2C7;
+            dotColor = 0xFFFF9500;
+            state = "缺少摄像头权限";
+            code = 0;
+        } else if (running) {
+            bgColor = 0xFFF1FBF5;
+            strokeColor = 0xFFC9EFD8;
+            dotColor = C_GREEN;
+            state = "识别中";
+            code = 2;
         } else {
-            sb.append("· 动作：").append(fingerName(sp.getString("gesture_next", "1")))
-                    .append(" → 下一个，").append(fingerName(sp.getString("gesture_prev", "2")))
-                    .append(" → 上一个（保持 0.4 秒）\n");
-            sb.append("· 检测阈值：").append(fmtTh(sp.getFloat("gesture_th", 0.35f)))
-                    .append("（手抬到脸旁、掌心朝镜头、30~60cm）\n");
+            bgColor = C_CARD;
+            strokeColor = C_LINE;
+            dotColor = 0xFFC7CBD1;
+            state = "未启动";
+            code = 1;
         }
-        sb.append("· 采集：").append(sp.getBoolean("high_accuracy", false)
-                ? "高精度 960×720" : "标准 640×480")
-                .append(" · 放大 ").append(String.format(java.util.Locale.US, "%.1fx",
-                        sp.getFloat("zoom_factor", 1.0f))).append("\n");
-        sb.append("· 摄像头权限：").append(camPerm ? "已授权" : "⚠ 未授权（点下方按钮）").append("\n");
-        sb.append("· 引擎：").append(!camPerm ? "未启动（缺权限）"
-                : (VisionService.engineReady ? "识别中 ✓" : "未启动（点「开启识别」）")).append("\n");
-        sb.append("· 最近识别：").append(VisionService.lastAction.isEmpty() ? "（还没有）" : VisionService.lastAction);
-        status.setText(sb.toString());
+        if (code != lastStateCode) {
+            lastStateCode = code;
+            statusCard.setBackground(roundRect(bgColor, 16, strokeColor, 1));
+            stateDot.setBackground(circle(dotColor));
+        }
+        stateText.setText(state);
+        stateMode.setText(faceMode ? "表情模式" : "手势模式");
+
+        String zoom = String.format(java.util.Locale.US, "%.1fx", sp.getFloat("zoom_factor", 1.0f));
+        stateDetail.setText("采集 " + (sp.getBoolean("high_accuracy", false) ? "960×720" : "640×480")
+                + " · 放大 " + zoom
+                + " · 冷却 " + String.format(java.util.Locale.US, "%g",
+                sp.getLong("cooldown_ms", 1500) / 1000.0) + "s");
+
+        String last = VisionService.lastAction;
+        stateLast.setText(last == null || last.isEmpty() ? "还没有识别到动作" : "最近：" + last);
+
+        if (startBtn != null) {
+            startBtn.setEnabled(!running);
+            startBtn.setAlpha(running ? 0.45f : 1f);
+        }
+        if (stopBtn != null) {
+            stopBtn.setAlpha(running ? 1f : 0.6f);
+        }
+        if (exitBtn != null) {
+            exitBtn.setAlpha(1f);
+        }
+    }
+
+    private void setFaceMode(boolean face) {
+        sp.edit().putBoolean("face_ctrl", face).putBoolean("gesture_cam", !face).apply();
+        applyModeSegment();
+        refreshSummaries();
+        refreshStatusOnly();
+        if (VisionService.engineReady) {
+            Toast.makeText(MainActivity.this,
+                    "已切换识别方式，请「停止识别」再「开启识别」使其生效", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void applyModeSegment() {
+        if (segGesture == null || segFace == null) {
+            return;
+        }
+        boolean face = sp.getBoolean("face_ctrl", true);
+        segGesture.setBackground(face ? null : roundRect(C_CARD, 9, 0, 0));
+        segGesture.setTextColor(face ? C_SUB : C_TEXT);
+        segFace.setBackground(face ? roundRect(C_CARD, 9, 0, 0) : null);
+        segFace.setTextColor(face ? C_TEXT : C_SUB);
+        segGesture.setElevation(face ? 0 : dp(1));
+        segFace.setElevation(face ? dp(1) : 0);
     }
 
     private static String fingerName(String v) {
         return v + " 根手指";
-    }
-
-    private static String fmtTh(float v) {
-        return String.format(java.util.Locale.US, "%.2f", v);
     }
 
     private static String actionName(String act) {
@@ -941,27 +1326,36 @@ public class MainActivity extends Activity {
         String url = sp.getString("shortx_url_next", "");
         ok = ShortX.available(this);
         if (!ok) {
-            text = "DeepLink 通道：ShortX 未检测到 ✗——请确认已安装并在 LSPosed 启用";
+            text = "通道状态：ShortX 未检测到 ✗——请确认已安装并在 LSPosed 启用";
         } else if (url.isEmpty()) {
-            text = "DeepLink 通道：⚠ 上方链接还没填——请粘贴 shortx://run?id=... ";
+            text = "通道状态：⚠ 上方链接还没填";
         } else if (sp.getString("shortx_url_prev", "").isEmpty()) {
-            text = "DeepLink 通道：⚠「上一个」链接还没填（只能翻下一个）";
+            text = "通道状态：⚠「上一个」链接还没填（只能翻下一个）";
         } else {
-            text = "DeepLink 通道：就绪 ✓（两个链接都已填）";
+            text = "通道状态：就绪 ✓";
         }
         linkStatus.setText(text);
-        linkStatus.setTextColor(Color.parseColor(ok ? "#0B6E00" : "#B00000"));
+        linkStatus.setTextColor(ok ? C_GREEN : C_DANGER);
+        if (secShortX != null) {
+            if (!ok) {
+                secShortX.summary("未连接");
+            } else if (url.isEmpty() || sp.getString("shortx_url_prev", "").isEmpty()) {
+                secShortX.summary("待配置");
+            } else {
+                secShortX.summary("就绪");
+            }
+        }
     }
 
-    /** v4.8：显示当前预览方向（-1 = 自动） */
+    /** v4.8：显示当前预览方向（0 = 自动） */
     private void updatePvRotInfo() {
         if (pvRotInfo == null) {
             return;
         }
         int ex = CameraVisionEngine.previewRotationExtra;
         pvRotInfo.setText(ex == 0
-                ? "画面方向：自动（若上下颠倒，点右边按钮，每点一次转 90°）"
-                : "画面方向：自动 +" + ex + "°（长按按钮恢复自动）");
+                ? "方向：自动（颠倒时点右边）"
+                : "方向：自动 +" + ex + "°（长按恢复）");
     }
 
     private void clearPreview() {
@@ -1009,24 +1403,22 @@ public class MainActivity extends Activity {
     private View faceCatalogCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundColor(Color.parseColor("#F4F5F7"));
-        card.setPadding(dp(10), dp(8), dp(10), dp(8));
+        card.setBackground(roundRect(0xFFF7F8FA, 10, 0, 0));
+        card.setPadding(dp(10), dp(10), dp(10), dp(10));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(4);
+        lp.topMargin = dp(8);
         card.setLayoutParams(lp);
 
-        card.addView(catalogHead("支持的全部表情动作（共 8 种）："));
+        card.addView(catalogHead("支持的全部表情动作（共 8 种）"));
         for (String[] a : FACE_ACTIONS) {
             card.addView(catalogRow(a[0], faceHint(a[1]), "推荐 " + a[2]));
         }
 
-        TextView note = new TextView(this);
-        note.setTextSize(11);
-        note.setTextColor(Color.parseColor("#888888"));
-        note.setPadding(0, dp(6), 0, 0);
-        note.setText("「推荐」= 实测比较好触发的阈值，切换动作时自动填进右侧输入框，也可以自己改。"
-                + "两个方向可以选同一个动作，各用各的阈值。");
+        TextView note = text("「推荐」= 实测比较好触发的阈值，切换动作时会自动填进右侧输入框，也可以自己改。",
+                11, C_SUB, false);
+        note.setPadding(0, dp(8), 0, 0);
+        note.setLineSpacing(dp(2), 1f);
         card.addView(note);
         return card;
     }
@@ -1061,11 +1453,7 @@ public class MainActivity extends Activity {
     }
 
     private TextView catalogHead(String text) {
-        TextView t = new TextView(this);
-        t.setText(text);
-        t.setTextSize(12);
-        t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        t.setTextColor(Color.parseColor("#333333"));
+        TextView t = text(text, 12, 0xFF33363C, true);
         t.setPadding(0, 0, 0, dp(4));
         return t;
     }
@@ -1076,28 +1464,19 @@ public class MainActivity extends Activity {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(0, dp(3), 0, dp(3));
 
-        TextView n = new TextView(this);
-        n.setText(name);
-        n.setTextSize(13);
-        n.setTextColor(Color.parseColor("#1A1A1A"));
+        TextView n = text(name, 12, C_TEXT, false);
         n.setLayoutParams(new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f));
+                LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f));
         row.addView(n);
 
-        TextView d = new TextView(this);
-        d.setText(desc);
-        d.setTextSize(11);
-        d.setTextColor(Color.parseColor("#666666"));
+        TextView d = text(desc, 11, C_SUB, false);
         d.setLayoutParams(new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 2.5f));
+                LinearLayout.LayoutParams.WRAP_CONTENT, 2.4f));
         row.addView(d);
 
-        TextView t = new TextView(this);
-        t.setText(th);
-        t.setTextSize(11);
-        t.setTextColor(Color.parseColor("#00796B"));
+        TextView t = text(th, 11, 0xFF00796B, false);
         t.setGravity(Gravity.END);
-        t.setLayoutParams(new LinearLayout.LayoutParams(dp(56),
+        t.setLayoutParams(new LinearLayout.LayoutParams(dp(58),
                 LinearLayout.LayoutParams.WRAP_CONTENT));
         row.addView(t);
         return row;
